@@ -11,9 +11,7 @@ from pathlib import Path
 
 # Import content analysis modules
 try:
-    from text_extractor import TextExtractor
-    from nlp_analyzer import NLPAnalyzer
-    from content_categorizer import ContentCategorizer
+    from text_analysis import TextAnalyzer
     CONTENT_ANALYSIS_AVAILABLE = True
 except ImportError:
     CONTENT_ANALYSIS_AVAILABLE = False
@@ -34,10 +32,18 @@ def check_content_analysis_dependencies():
         bool: True if all required packages are installed, False otherwise
     """
     if not CONTENT_ANALYSIS_AVAILABLE:
-        logger.warning("Content analysis modules not found. Some features will be unavailable.")
+        logger.warning("TextAnalyzer module not found. Content analysis features will be unavailable.")
         logger.info("To enable content analysis, install required packages: pip install -r requirements.txt")
         return False
-    return True
+    
+    # Check additional dependencies that might be needed
+    try:
+        import yaml
+        return True
+    except ImportError:
+        logger.warning("PyYAML not found. Required for content analysis configuration.")
+        logger.info("Please install with: pip install pyyaml")
+        return False
 
 # Dictionary mapping file extensions to folder names
 EXTENSION_MAP = {
@@ -301,27 +307,42 @@ def organize_files(directory, config=None, args=None):
             logger.info(f"Using content-based organization with {'parallel' if use_parallel else 'sequential'} processing")
             logger.info(f"Multi-category files will be {'symlinked' if create_symlinks else 'copied'} to all matching categories")
             
-            # Configure content analysis settings from CLI args
-            if config and "content_analysis" in config and "processing" in config["content_analysis"]:
-                if hasattr(args, 'parallel'):
-                    config["content_analysis"]["processing"]["parallel_processing"] = use_parallel
-                if hasattr(args, 'symlinks'):
-                    config["content_analysis"]["processing"]["create_symlinks"] = create_symlinks
-            
             # Perform content-based organization
             try:
-                content_categorizer = ContentCategorizer(config_path=args.config if args and hasattr(args, 'config') else "config.yaml")
+                # Initialize TextAnalyzer with config
+                analyzer = TextAnalyzer(config_path=args.config if args and hasattr(args, 'config') else "config.yaml")
+                
+                # Set min_confidence if specified
+                if args and hasattr(args, 'min_confidence'):
+                    analyzer.min_confidence = args.min_confidence
+                    logger.info(f"Set minimum confidence threshold to {args.min_confidence}")
+                
+                # Show keywords if requested
+                show_keywords = args and hasattr(args, 'keywords') and args.keywords
                 
                 if dry_run:
                     logger.info("DRY RUN: Would perform content-based categorization")
                     # Just scan files and report what would happen
-                    for file_path in Path(directory).glob('**/*'):
-                        if file_path.is_file() and file_path.suffix.lower() in content_categorizer.text_extractor.get_supported_formats():
-                            categories = content_categorizer.get_file_categories(str(file_path))
-                            if categories:
-                                logger.info(f"Would categorize {file_path.name} into: {', '.join(categories)}")
+                    supported_extensions = ['.txt', '.pdf', '.doc', '.docx', '.md', '.rtf']
+                    for file_path in Path(directory).glob('*'):
+                        if file_path.is_file() and file_path.suffix.lower() in supported_extensions:
+                            try:
+                                analysis = analyzer.analyze_file(str(file_path))
+                                categories = analyzer.get_categories(analysis)
+                                if categories:
+                                    logger.info(f"Would categorize {file_path.name} into: {', '.join(categories)}")
+                                    if show_keywords:
+                                        keywords = analyzer.get_top_keywords(analysis, limit=5)
+                                        if keywords:
+                                            keyword_str = ", ".join([f"{k}:{round(s, 2)}" for k, s in keywords])
+                                            logger.info(f"Top keywords: {keyword_str}")
+                                else:
+                                    logger.info(f"No categories found for {file_path.name}")
+                            except Exception as e:
+                                logger.error(f"Error analyzing {file_path.name}: {e}")
                 else:
-                    content_categorizer.categorize_directory(directory, base_dir)
+                    # Process files with content analysis
+                    organize_files_by_content(directory, base_dir, analyzer, move_files, create_symlinks, use_parallel, min_size, ignore_older_than)
                 
                 return True
             except Exception as e:
@@ -419,6 +440,141 @@ def organize_files(directory, config=None, args=None):
     except Exception as e:
         logger.error(f"Error during organization: {e}")
         return False
+def organize_files_by_content(src_dir, dest_dir, analyzer, move_files=True, create_symlinks=True, parallel=True, min_size=0, ignore_older_than=0):
+    """
+    Organize files based on content analysis.
+    
+    Args:
+        src_dir (str): Source directory containing files to organize
+        dest_dir (str): Destination directory for organized files
+        analyzer (TextAnalyzer): Initialized TextAnalyzer instance
+        move_files (bool): Whether to move files (True) or copy them (False)
+        create_symlinks (bool): Whether to create symlinks for multi-category files
+        parallel (bool): Whether to use parallel processing
+        min_size (int): Minimum file size in bytes to process
+        ignore_older_than (int): Ignore files older than specified days
+    """
+    src_dir = Path(src_dir)
+    dest_dir = Path(dest_dir)
+    
+    # Supported file types for text analysis
+    supported_extensions = ['.txt', '.pdf', '.doc', '.docx', '.md', '.rtf']
+    
+    # Get list of files to process
+    files = [f for f in src_dir.glob('*') if f.is_file() and f.suffix.lower() in supported_extensions]
+    logger.info(f"Found {len(files)} supported files for content analysis")
+    
+    # Apply filters
+    if min_size > 0:
+        files = [f for f in files if f.stat().st_size >= min_size]
+        logger.info(f"{len(files)} files meet the minimum size requirement")
+    
+    if ignore_older_than > 0:
+        cutoff_time = datetime.datetime.now() - datetime.timedelta(days=ignore_older_than)
+        files = [f for f in files if datetime.datetime.fromtimestamp(f.stat().st_mtime) >= cutoff_time]
+        logger.info(f"{len(files)} files meet the age requirement")
+    
+    # Prepare destination directories
+    categories = list(analyzer.config.get('content_analysis', {}).get('tags', {}).keys())
+    if categories:
+        for category in categories:
+            category_dir = dest_dir / category
+            category_dir.mkdir(parents=True, exist_ok=True)
+            logger.debug(f"Created category directory: {category_dir}")
+    
+    # Create Unclassified folder
+    unclassified_dir = dest_dir / "Unclassified"
+    unclassified_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Process files
+    processed_count = 0
+    error_count = 0
+    
+    # Batch analyze if parallel is enabled
+    if parallel and len(files) > 1:
+        file_paths = [str(f) for f in files]
+        results = analyzer.batch_analyze_files(file_paths, parallel=True)
+        
+        # Process results
+        for file_path, analysis in results.items():
+            file_path = Path(file_path)
+            categories = analyzer.get_categories(analysis)
+            _organize_single_file_by_content(file_path, dest_dir, categories, move_files, create_symlinks)
+            processed_count += 1
+    else:
+        # Process files sequentially
+        for file_path in files:
+            try:
+                analysis = analyzer.analyze_file(str(file_path))
+                categories = analyzer.get_categories(analysis)
+                _organize_single_file_by_content(file_path, dest_dir, categories, move_files, create_symlinks)
+                processed_count += 1
+            except Exception as e:
+                logger.error(f"Error analyzing {file_path.name}: {e}")
+                error_count += 1
+    
+    logger.info(f"Content analysis organization complete. Processed {processed_count} files, {error_count} errors.")
+
+def _organize_single_file_by_content(file_path, dest_dir, categories, move_files=True, create_symlinks=True):
+    """
+    Organize a single file based on its content categories.
+    
+    Args:
+        file_path (Path): Path to the file
+        dest_dir (Path): Base destination directory
+        categories (List[str]): List of categories for the file
+        move_files (bool): Whether to move or copy the file
+        create_symlinks (bool): Whether to create symlinks for multi-category files
+    """
+    file_path = Path(file_path)
+    dest_dir = Path(dest_dir)
+    
+    # If no categories found, put in Unclassified
+    if not categories:
+        target_dir = dest_dir / "Unclassified"
+        target_path = target_dir / file_path.name
+        target_path = Path(get_unique_filename(str(target_path)))
+        
+        try:
+            if move_files:
+                shutil.move(str(file_path), str(target_path))
+                logger.info(f"Moved to Unclassified: {file_path.name}")
+            else:
+                shutil.copy2(str(file_path), str(target_path))
+                logger.info(f"Copied to Unclassified: {file_path.name}")
+        except Exception as e:
+            logger.error(f"Error organizing {file_path.name}: {e}")
+        
+        return
+    
+    # Handle categorized files
+    first_category = True
+    for category in categories:
+        target_dir = dest_dir / category
+        target_path = target_dir / file_path.name
+        target_path = Path(get_unique_filename(str(target_path)))
+        
+        try:
+            if first_category:
+                # Move or copy to first category
+                if move_files:
+                    shutil.move(str(file_path), str(target_path))
+                    logger.info(f"Moved to {category}: {file_path.name}")
+                else:
+                    shutil.copy2(str(file_path), str(target_path))
+                    logger.info(f"Copied to {category}: {file_path.name}")
+                first_file_path = target_path
+                first_category = False
+            elif create_symlinks:
+                # Create symlinks for additional categories
+                target_path.symlink_to(first_file_path)
+                logger.info(f"Created symlink in {category}: {file_path.name}")
+            else:
+                # Copy to all categories
+                shutil.copy2(str(file_path), str(target_path))
+                logger.info(f"Copied to {category}: {file_path.name}")
+        except Exception as e:
+            logger.error(f"Error organizing {file_path.name} to {category}: {e}")
 
 def parse_arguments():
     """
@@ -442,7 +598,7 @@ def parse_arguments():
                       help="Ignore files older than specified days")
     parser.add_argument("--config", default="config.yaml",
                       help="Path to configuration file (default: config.yaml)")
-                      
+    
     # Content analysis related arguments
     content_group = parser.add_argument_group('Content Analysis', 'Options for content-based file organization')
     content_group.add_argument("--content-analysis", action="store_true",
@@ -453,37 +609,55 @@ def parse_arguments():
                       help="Create symlinks for multi-category files")
     content_group.add_argument("--base-dir", 
                       help="Specify output directory for categorized files")
+    content_group.add_argument("--min-confidence", type=float, default=0.6,
+                      help="Minimum confidence threshold for category assignment (0.0-1.0)")
+    content_group.add_argument("--keywords", action="store_true",
+                      help="Show detected keywords and their weights")
     
     return parser.parse_args()
 
 def main():
-    """Main function that processes the directory"""
-    args = parse_arguments()
+    """
+    Main function that processes the directory
     
-    # Set logging level based on verbosity
-    if args.verbose:
-        logger.setLevel(logging.DEBUG)
-    
-    directory = os.path.abspath(args.directory)
-    logger.info(f"Starting organization for directory: {directory}")
-    
-    # Load configuration from file
-    config_path = args.config if hasattr(args, 'config') else "config.yaml"
-    config = load_config(config_path)
-    
-    # Check content analysis dependencies if requested
-    if args.content_analysis:
-        if not check_content_analysis_dependencies():
-            logger.warning("Continuing with extension-based organization only")
-            args.content_analysis = False
-    
-    if organize_files(directory, config, args):
-        logger.info("File organization completed successfully")
-    else:
-        logger.error("File organization failed")
+    Returns:
+        int: Exit code (0 for success, 1 for failure)
+    """
+    try:
+        # Parse command line arguments
+        args = parse_arguments()
+        
+        # Set logging level based on verbosity
+        if args.verbose:
+            logger.setLevel(logging.DEBUG)
+        
+        # Get absolute path of target directory
+        directory = os.path.abspath(args.directory)
+        logger.info(f"Starting organization for directory: {directory}")
+        
+        # Load configuration from file
+        config_path = args.config if hasattr(args, 'config') else "config.yaml"
+        config = load_config(config_path)
+        
+        # Check content analysis dependencies if requested
+        if args.content_analysis:
+            if not check_content_analysis_dependencies():
+                logger.warning("Continuing with extension-based organization only")
+                args.content_analysis = False
+        
+        # Organize files and return appropriate exit code
+        if organize_files(directory, config, args):
+            logger.info("File organization completed successfully")
+            return 0
+        else:
+            logger.error("File organization failed")
+            return 1
+    except KeyboardInterrupt:
+        logger.warning("Operation interrupted by user")
         return 1
-    
-    return 0
+    except Exception as e:
+        logger.error(f"Unhandled error: {e}")
+        return 1
 
 if __name__ == "__main__":
     exit_code = main()

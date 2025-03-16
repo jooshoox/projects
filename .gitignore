@@ -1,0 +1,30 @@
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Log files
+*.log
+logs/
+
+# Cache directories
+.cache/
+.cached/
+
+# Test files and sample data
+test_files/
+sample_data/
+
+# Other temporary files
+*.tmp
+*.temp
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+.coverage
+htmlcov/
+*.bak
+
