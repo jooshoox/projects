@@ -1,0 +1,2 @@
+Research study on machine learning applications.
+Methodology includes data analysis and findings suggest improved accuracy.

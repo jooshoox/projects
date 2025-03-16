@@ -6,7 +6,17 @@ import logging
 import yaml
 import datetime
 import time
+import math
 from pathlib import Path
+
+# Import content analysis modules
+try:
+    from text_extractor import TextExtractor
+    from nlp_analyzer import NLPAnalyzer
+    from content_categorizer import ContentCategorizer
+    CONTENT_ANALYSIS_AVAILABLE = True
+except ImportError:
+    CONTENT_ANALYSIS_AVAILABLE = False
 
 # Set up logging
 logging.basicConfig(
@@ -14,6 +24,20 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger('file_organizer')
+
+# Check if required packages are installed for content analysis
+def check_content_analysis_dependencies():
+    """
+    Check if required packages for content analysis are installed
+    
+    Returns:
+        bool: True if all required packages are installed, False otherwise
+    """
+    if not CONTENT_ANALYSIS_AVAILABLE:
+        logger.warning("Content analysis modules not found. Some features will be unavailable.")
+        logger.info("To enable content analysis, install required packages: pip install -r requirements.txt")
+        return False
+    return True
 
 # Dictionary mapping file extensions to folder names
 EXTENSION_MAP = {
@@ -221,11 +245,15 @@ def get_unique_filename(target_path):
 def organize_files(directory, config=None, args=None):
     """
     Organize files in the specified directory based on their extensions
+    or content analysis.
     
     Args:
         directory (str): Directory to organize
         config (dict, optional): Configuration dictionary
         args (argparse.Namespace, optional): Command line arguments
+        
+    Returns:
+        bool: True if organization was successful, False otherwise
     """
     try:
         # Use default empty config if none provided
@@ -239,6 +267,12 @@ def organize_files(directory, config=None, args=None):
         ignore_older_than = args.ignore_older_than if args and hasattr(args, 'ignore_older_than') else settings.get("ignore_older_than", 0)
         move_files = args.move if args and hasattr(args, 'move') else settings.get("move_files", True)
         
+        # Content analysis options
+        use_content_analysis = args.content_analysis if args and hasattr(args, 'content_analysis') else False
+        use_parallel = args.parallel if args and hasattr(args, 'parallel') else config.get("content_analysis", {}).get("processing", {}).get("parallel_processing", True)
+        create_symlinks = args.symlinks if args and hasattr(args, 'symlinks') else config.get("content_analysis", {}).get("processing", {}).get("create_symlinks", True)
+        base_dir = args.base_dir if args and hasattr(args, 'base_dir') and args.base_dir else directory
+        
         # Build extension map from config
         extension_map = build_extension_map(config)
         
@@ -248,6 +282,7 @@ def organize_files(directory, config=None, args=None):
             return False
         
         # Log operation mode
+        # Log operation mode
         if dry_run:
             logger.info(f"DRY RUN MODE: Starting organization preview of {directory}")
         else:
@@ -256,6 +291,42 @@ def organize_files(directory, config=None, args=None):
         # Log settings in use
         logger.info(f"Settings: min_size={min_size} bytes, ignore_older_than={ignore_older_than} days, {'move' if move_files else 'copy'} files")
         
+        # Use content-based organization if enabled
+        if use_content_analysis:
+            if not CONTENT_ANALYSIS_AVAILABLE:
+                logger.error("Content analysis requested but dependencies are not available")
+                logger.info("Install required packages: pip install -r requirements.txt")
+                return False
+                
+            logger.info(f"Using content-based organization with {'parallel' if use_parallel else 'sequential'} processing")
+            logger.info(f"Multi-category files will be {'symlinked' if create_symlinks else 'copied'} to all matching categories")
+            
+            # Configure content analysis settings from CLI args
+            if config and "content_analysis" in config and "processing" in config["content_analysis"]:
+                if hasattr(args, 'parallel'):
+                    config["content_analysis"]["processing"]["parallel_processing"] = use_parallel
+                if hasattr(args, 'symlinks'):
+                    config["content_analysis"]["processing"]["create_symlinks"] = create_symlinks
+            
+            # Perform content-based organization
+            try:
+                content_categorizer = ContentCategorizer(config_path=args.config if args and hasattr(args, 'config') else "config.yaml")
+                
+                if dry_run:
+                    logger.info("DRY RUN: Would perform content-based categorization")
+                    # Just scan files and report what would happen
+                    for file_path in Path(directory).glob('**/*'):
+                        if file_path.is_file() and file_path.suffix.lower() in content_categorizer.text_extractor.get_supported_formats():
+                            categories = content_categorizer.get_file_categories(str(file_path))
+                            if categories:
+                                logger.info(f"Would categorize {file_path.name} into: {', '.join(categories)}")
+                else:
+                    content_categorizer.categorize_directory(directory, base_dir)
+                
+                return True
+            except Exception as e:
+                logger.error(f"Error during content-based organization: {e}")
+                return False
         # First create all needed directories (skip in dry run mode)
         if not dry_run:
             create_directories(directory, extension_map)
@@ -366,7 +437,24 @@ def parse_arguments():
     parser.add_argument("--copy", dest="move", action="store_false",
                       help="Copy files instead of moving them")
     parser.add_argument("--min-size", type=int, default=0,
-                      help="
+                      help="Minimum file size in bytes to process")
+    parser.add_argument("--ignore-older-than", type=int, default=0,
+                      help="Ignore files older than specified days")
+    parser.add_argument("--config", default="config.yaml",
+                      help="Path to configuration file (default: config.yaml)")
+                      
+    # Content analysis related arguments
+    content_group = parser.add_argument_group('Content Analysis', 'Options for content-based file organization')
+    content_group.add_argument("--content-analysis", action="store_true",
+                      help="Enable content-based categorization")
+    content_group.add_argument("--parallel", action="store_true",
+                      help="Enable parallel processing for content analysis")
+    content_group.add_argument("--symlinks", action="store_true",
+                      help="Create symlinks for multi-category files")
+    content_group.add_argument("--base-dir", 
+                      help="Specify output directory for categorized files")
+    
+    return parser.parse_args()
 
 def main():
     """Main function that processes the directory"""
@@ -379,7 +467,17 @@ def main():
     directory = os.path.abspath(args.directory)
     logger.info(f"Starting organization for directory: {directory}")
     
-    if organize_files(directory):
+    # Load configuration from file
+    config_path = args.config if hasattr(args, 'config') else "config.yaml"
+    config = load_config(config_path)
+    
+    # Check content analysis dependencies if requested
+    if args.content_analysis:
+        if not check_content_analysis_dependencies():
+            logger.warning("Continuing with extension-based organization only")
+            args.content_analysis = False
+    
+    if organize_files(directory, config, args):
         logger.info("File organization completed successfully")
     else:
         logger.error("File organization failed")

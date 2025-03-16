@@ -1,0 +1,2 @@
+This is a technical document about software development and programming. 
+It contains detailed technical documentation about code architecture.
