@@ -1,0 +1,58 @@
+# File Organizer Configuration
+
+# Define custom categories and their file extensions
+categories:
+  documents:
+    - .pdf
+    - .doc
+    - .docx
+    - .txt
+    - .rtf
+    - .odt
+  
+  images:
+    - .jpg
+    - .jpeg
+    - .png
+    - .gif
+    - .bmp
+    - .svg
+    - .webp
+  
+  audio:
+    - .mp3
+    - .wav
+    - .flac
+    - .m4a
+    - .ogg
+  
+  video:
+    - .mp4
+    - .avi
+    - .mkv
+    - .mov
+    - .wmv
+  
+  archives:
+    - .zip
+    - .rar
+    - .7z
+    - .tar
+    - .gz
+  
+  code:
+    - .py
+    - .js
+    - .java
+    - .cpp
+    - .h
+    - .css
+    - .html
+
+# Additional settings
+settings:
+  create_missing_dirs: true
+  dry_run: false
+  minimum_file_size: 0  # in bytes
+  ignore_older_than: 0   # in days (0 to process all files)
+  move_files: true       # false for copy instead of move
